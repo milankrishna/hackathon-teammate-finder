@@ -53,6 +53,8 @@ test('Atlas API audit using isolated temporary records', { skip: process.env.RUN
   const cleanupEmails = [...emails, `${tag}-too-long@example.invalid`];
   const password = 'Temporary-Audit-Password-927!';
   const teamIds = [];
+  const externalBase = process.env.AUDIT_BASE_URL;
+  if (externalBase) assert.match(externalBase, /^http:\/\/127\.0\.0\.1:\d+\/api$/, 'External audit target must be a local test server');
   let child;
   let connected = false;
 
@@ -92,11 +94,13 @@ test('Atlas API audit using isolated temporary records', { skip: process.env.RUN
   await once(reservation, 'listening');
   const port = reservation.address().port;
   await new Promise((resolve) => reservation.close(resolve));
-  child = spawn(process.execPath, ['index.js'], {
-    cwd: serverDirectory, env: { ...process.env, PORT: String(port) }, stdio: ['ignore', 'pipe', 'pipe'],
+  const functionMode = process.env.AUDIT_SERVERLESS === '1';
+  const serverArgs = functionMode ? ['-e', "require('node:http').createServer(require('../api/handler')).listen(process.env.PORT, () => console.log('Server running on port ' + process.env.PORT));"] : ['index.js'];
+  if (!externalBase) child = spawn(process.execPath, serverArgs, {
+    cwd: serverDirectory, env: { ...process.env, PORT: String(port), ...(functionMode ? { VERCEL: '1' } : {}) }, stdio: ['ignore', 'pipe', 'pipe'],
   });
-  child.stderr.on('data', () => {});
-  await new Promise((resolve, reject) => {
+  child?.stderr.on('data', () => {});
+  if (child) await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Audit server startup timed out')), 40000);
     child.stdout.on('data', (chunk) => {
       if (chunk.toString().includes(`Server running on port ${port}`)) { clearTimeout(timer); resolve(); }
@@ -106,7 +110,7 @@ test('Atlas API audit using isolated temporary records', { skip: process.env.RUN
   });
 
   async function request(method, endpoint, body, token) {
-    const response = await fetch(`http://127.0.0.1:${port}/api${endpoint}`, {
+    const response = await fetch(`${externalBase || `http://127.0.0.1:${port}/api`}${endpoint}`, {
       method, headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20000),
     });

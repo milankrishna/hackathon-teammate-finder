@@ -1,4 +1,6 @@
-require('dotenv').config();
+if (!process.env.VERCEL) {
+  require('dotenv').config({ path: require('node:path').join(__dirname, '.env'), quiet: true });
+}
 
 const express = require('express');
 const cors = require('cors');
@@ -12,7 +14,13 @@ const app = express();
 const PORT = process.env.PORT || 5001;
 
 app.use(express.json());
-app.use(cors());
+// The deployed frontend/API share an origin. Local direct browser access is
+// limited to Vite; normal local requests still use its same-origin /api proxy.
+app.use(cors({ origin: process.env.VERCEL ? false : 'http://localhost:5173' }));
+app.use('/api', (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
 
 app.get('/api/health', (req, res) => {
   res.status(200).json({
@@ -21,10 +29,24 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-app.use('/api/auth', authRoutes);
-app.use('/api/teams', teamRoutes);
-app.use('/api/requests', requestRoutes);
-app.use('/api/admin', adminRoutes);
+async function ensureDatabase(req, res, next) {
+  try {
+    await connectHackathonDB();
+    return next();
+  } catch {
+    return res.status(503).json({ error: 'Database unavailable. Please try again later.' });
+  }
+}
+
+app.use('/api/auth', ensureDatabase, authRoutes);
+app.use('/api/teams', ensureDatabase, teamRoutes);
+app.use('/api/requests', ensureDatabase, requestRoutes);
+app.use('/api/admin', ensureDatabase, adminRoutes);
+
+// API typos must never fall through to the React SPA or Express HTML errors.
+app.use((req, res) => {
+  res.status(404).json({ error: 'API route not found.' });
+});
 
 app.use((error, req, res, next) => {
   if (res.headersSent) {
@@ -47,4 +69,11 @@ async function startServer() {
   });
 }
 
-startServer();
+module.exports = app;
+
+if (require.main === module && !process.env.VERCEL) {
+  startServer().catch(() => {
+    console.error('Server startup failed. Check the server database configuration.');
+    process.exit(1);
+  });
+}

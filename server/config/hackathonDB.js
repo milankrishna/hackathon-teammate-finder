@@ -1,17 +1,30 @@
 const mongoose = require('mongoose');
 const dns = require('node:dns');
 
+// A warm function instance shares one driver pool and one in-flight connection.
+// The driver handles reconnecting established pools; don't connect per request.
+let connectionPromise;
+
 async function connectHackathonDB() {
+  if (connectionPromise) return connectionPromise;
+
   if (!process.env.MONGO_URI) {
     console.error('Missing configuration: MONGO_URI is required to connect to MongoDB.');
-    process.exit(1);
+    throw new Error('Database configuration is missing.');
   }
 
-  try {
-    dns.setServers(['8.8.8.8']);
-    await mongoose.connect(process.env.MONGO_URI);
+  dns.setServers(['8.8.8.8']);
+  connectionPromise = mongoose.connect(process.env.MONGO_URI, {
+    maxPoolSize: 10,
+    minPoolSize: 0,
+    serverSelectionTimeoutMS: 10000,
+    connectTimeoutMS: 10000,
+  }).then(() => {
     console.log('MongoDB connected');
-  } catch (error) {
+    return mongoose;
+  }).catch((error) => {
+    // A rejected cold-start attempt must not poison subsequent invocations.
+    connectionPromise = undefined;
     const secrets = [process.env.MONGO_URI, process.env.JWT_SECRET];
 
     try {
@@ -49,8 +62,10 @@ async function connectHackathonDB() {
     if (error.cause?.message) {
       console.error('Cause:', redact(error.cause.message));
     }
-    process.exit(1);
-  }
+    throw new Error('Database connection unavailable.');
+  });
+
+  return connectionPromise;
 }
 
 module.exports = connectHackathonDB;
